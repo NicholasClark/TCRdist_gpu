@@ -1,16 +1,24 @@
 # load libraries/packages --------------
 
-#import cupy as mx #cuda python backend, connect to T4 runtime or other with GPU
-import mlx.core as mx #use this for apple silicon
+import utils
+gpu = utils.check_gpu()
+module = utils.check_cupy_or_mlx()
+
 import numpy as np
-#import numpy as mx #use this for CPU only
 import pandas as pd
 import time
 import scipy
 import os
-#from numba import njit, prange
-from multiprocessing import Pool
-pool = Pool()
+
+if gpu == "nvidia" and module == "cupy":
+    print("Loading cupy to perform TCRdist")
+    import cupy as mx #cuda python backend, connect to T4 runtime or other with GPU
+elif gpu == "apple" and module == "mlx":
+    print("Loading mlx to perform TCRdist")
+    import mlx.core as mx #use this for apple silicon
+else:
+    print("Loading numpy to perform TCRdist")
+    import numpy as mx #use this for CPU only
 
 # helper functions --------------
 
@@ -74,6 +82,23 @@ def encode_TCRs(tcr, params_vec, n_max=np.inf):
     #tcrs2=mx.array(encoded).astype(mx.uint8) # could be a different dataset, like a database
     return(encoded, tcrs1)
 
+def process_TCRs(tcr, params_vec, n_max=np.inf):
+    n_max = min(n_max, tcr.shape[0])
+    cdr3amat = np.array([pad_center(list(seq), 29) for seq in tcr['cdr3a'][:n_max] ])
+    cdr3amatint = np.vectorize(params_vec.get)(cdr3amat)
+    cdr3bmat = np.array([pad_center(list(seq), 29) for seq in tcr['cdr3b'][:n_max] ])
+    cdr3bmatint = np.vectorize(params_vec.get)(cdr3bmat)
+    
+    cols_to_use = slice(3, -2) #truncate CDR3s
+    
+    encoded = np.column_stack([
+        np.vectorize(params_vec.get)(tcr['va'][:n_max]),
+        cdr3amatint[:,cols_to_use],
+        np.vectorize(params_vec.get)(tcr['vb'][:n_max]),
+        cdr3bmatint[:,cols_to_use]
+    ])
+    tcrs=mx.array(encoded).astype(mx.uint8)
+    return(tcrs)
 
 # naive TCRdist functions --------------
 
@@ -100,11 +125,16 @@ def TCRdist_no_loop(tcr1, tcr2, submat):
 #### Returns dataframe with 3 columns: 'row' (row_index), 'col' (column index), and 'TCRdist' (TCRdist value)
 #### Can also return a sparse matrix of type scipy.sparse.csr_matrix 
 def TCRdist_simple(tcr1, tcr2, submat, tcrdist_cutoff=90, ch1=0, ch2=0, output = "edge_list"):
+    #params_vec = dict(zip(params_df["feature"], params_df["value"]))
+    #tcr1 = process_TCRs(tcr1, params_vec=params_vec)
+    #tcr2 = process_TCRs(tcr2, params_vec=params_vec)
     result = mx.sum(submat[tcr1[:, None, :], tcr2[ None,:, :]],axis=2)
     #zeros = mx.subtract(mx.equal(result, 0), mx.eye(n = result.shape[0], m = result.shape[1])) ## matrix keeping track of off-diagonal zeros
     #result = mx.add(result, mx.multiply(zeros, -1)) ## set off-diagonal zeros to -1
     less_or_equal = mx.less_equal(result, tcrdist_cutoff)
     result = result*less_or_equal
+    if mx.__name__ == "cupy":
+      result = mx.asnumpy(result)
     if output in ["sparse", "both", "edge_list"]:
         score_dtype = np.int16
         #if tcrdist_cutoff <= 255:
@@ -128,7 +158,13 @@ def TCRdist_simple(tcr1, tcr2, submat, tcrdist_cutoff=90, ch1=0, ch2=0, output =
 
 ### Returns a pandas data frame of all edges with TCRdist less than cutoff (default = 90)
 ### Returns dataframe with 3 columns: 'row' (row_index), 'col' (column index), and 'TCRdist' (TCRdist value)
-def TCRdist_batch(tcr1, tcr2, submat, tcrdist_cutoff=90, output = "edge_list", chunk_size=10000, print_chunk_size=10000, print_res = True):
+def TCRdist_batch(tcr1, tcr2, submat, params_df, tcrdist_cutoff=90, output = "edge_list", chunk_size=1000, print_chunk_size=1000, print_res = True):
+    #chunk_size = np.int64(chunk_size)
+    #print_chunk_size = np.int64(print_chunk_size)
+    submat = mx.array(submat)
+    params_vec = dict(zip(params_df["feature"], params_df["value"]))
+    tcr1 = process_TCRs(tcr1, params_vec=params_vec)
+    tcr2 = process_TCRs(tcr2, params_vec=params_vec)
     n1 = tcr1.shape[0]
     n2 = tcr2.shape[0]
     num_chunks1 = np.int64(np.ceil(n1//chunk_size))
