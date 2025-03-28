@@ -124,15 +124,12 @@ def TCRdist_no_loop(tcr1, submat, params_df, tcr2=None):
     ### 0.0009 seconds on local Apple Silicon GPU
     return(result)
 
-def check_batch(tcrdist_cutoff, n= 2000):
-    ## load data
-    tcr_both = pd.read_parquet(os.path.join("data", "vdj_and_covid_032425.parquet"))
-    tcr1 = tcr_both[:n]
-    params_df, _ = load_params_file()
-    submat = load_substitution_matrix()
-    chunk_n = 1000
+def check_batch(tcr1, submat, params_df, tcr2=None, tcrdist_cutoff=90, chunk_n=1000):
+    compare_to_self = False
+    if tcr2 is None:
+        compare_to_self = True
     ## run TCRdist function without batching
-    res1 = TCRdist_no_loop(tcr1, submat = submat, params_df = params_df)
+    res1 = TCRdist_no_loop(tcr1=tcr1, tcr2=tcr2, submat = submat, params_df = params_df)
     # convert TCRdist matrix to array of 
     res1 = np.array(res1)
     rows, cols = np.indices(res1.shape)
@@ -141,10 +138,11 @@ def check_batch(tcrdist_cutoff, n= 2000):
         'edge2_0index': cols.flatten(),
         'TCRdist': res1.flatten()
     })
-    df1 = df1[df1['edge1_0index'] > df1['edge2_0index']]
+    if compare_to_self:
+        df1 = df1[df1['edge1_0index'] > df1['edge2_0index']]
     df1 = df1[df1['TCRdist'] <= tcrdist_cutoff]
     ## run TCRdist batch function
-    res2 = TCRdist_batch(tcr1, submat = submat, params_df = params_df, 
+    res2 = TCRdist_batch(tcr1=tcr1, tcr2=tcr2, submat = submat, params_df = params_df, 
                          tcrdist_cutoff=tcrdist_cutoff,
                          chunk_size=chunk_n, print_chunk_size=chunk_n, print_res = True, only_lower_tri = True)
     df2 = res2['TCRdist_df']
