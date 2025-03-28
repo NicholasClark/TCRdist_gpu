@@ -103,9 +103,14 @@ def process_TCRs(tcr, params_vec, n_max=np.inf):
 # naive TCRdist functions --------------
 
 #### Naive no-loop TCRdist function for GPU -- returns full distance matrix
-def TCRdist_no_loop(tcr1, tcr2, submat):
+def TCRdist_no_loop(tcr1, submat, params_df, tcr2=None):
+    submat = mx.array(submat)
+    params_vec = dict(zip(params_df["feature"], params_df["value"]))
+    tcr1 = process_TCRs(tcr1, params_vec=params_vec)
     if tcr2 is None:
         tcr2 = tcr1
+    else:
+        tcr2 = process_TCRs(tcr2, params_vec=params_vec)
     start_time = time.time()
     #result=mx.zeros((tcrs1.shape[0],tcrs2.shape[0]),dtype=mx.uint32)
     result = mx.sum(submat[tcr1[:, None, :], tcr2[ None,:, :]],axis=2)
@@ -119,54 +124,147 @@ def TCRdist_no_loop(tcr1, tcr2, submat):
     ### 0.0009 seconds on local Apple Silicon GPU
     return(result)
 
+def check_batch(tcrdist_cutoff, n= 2000):
+    ## load data
+    tcr_both = pd.read_parquet(os.path.join("data", "vdj_and_covid_032425.parquet"))
+    tcr1 = tcr_both[:n]
+    params_df, _ = load_params_file()
+    submat = load_substitution_matrix()
+    chunk_n = 1000
+    ## run TCRdist function without batching
+    res1 = TCRdist_no_loop(tcr1, submat = submat, params_df = params_df)
+    # convert TCRdist matrix to array of 
+    res1 = np.array(res1)
+    rows, cols = np.indices(res1.shape)
+    df1 = pd.DataFrame({
+        'edge1_0index': rows.flatten(),
+        'edge2_0index': cols.flatten(),
+        'TCRdist': res1.flatten()
+    })
+    df1 = df1[df1['edge1_0index'] > df1['edge2_0index']]
+    df1 = df1[df1['TCRdist'] <= tcrdist_cutoff]
+    ## run TCRdist batch function
+    res2 = TCRdist_batch(tcr1, submat = submat, params_df = params_df, 
+                         tcrdist_cutoff=tcrdist_cutoff,
+                         chunk_size=chunk_n, print_chunk_size=chunk_n, print_res = True, only_lower_tri = True)
+    df2 = res2['TCRdist_df']
+    df1.reset_index(drop=True, inplace=True)
+    df2.reset_index(drop=True, inplace=True)
+    df1 = df1.sort_values(by=['edge1_0index', 'edge2_0index'])
+    df2 = df2.sort_values(by=['edge1_0index', 'edge2_0index'])
+    chk1 = df1['TCRdist'].tolist() == df2['TCRdist'].tolist()
+    chk2 = df1['edge1_0index'].tolist() == df2['edge1_0index'].tolist()
+    chk3 = df1['edge2_0index'].tolist() == df2['edge2_0index'].tolist()
+    chk = chk1 and chk2 and chk3
+    return(chk)
+    
+
 #### Naive no-loop TCRdist function for GPU with sparse output -- either sparse csr_matrix or pandas dataframe
 
 #### Returns only edges with TCRdist less than or equal to cutoff (default = 90)
 #### Returns dataframe with 3 columns: 'row' (row_index), 'col' (column index), and 'TCRdist' (TCRdist value)
 #### Can also return a sparse matrix of type scipy.sparse.csr_matrix 
-def TCRdist_simple(tcr1, tcr2, submat, tcrdist_cutoff=90, ch1=0, ch2=0, output = "edge_list"):
-    #params_vec = dict(zip(params_df["feature"], params_df["value"]))
-    #tcr1 = process_TCRs(tcr1, params_vec=params_vec)
-    #tcr2 = process_TCRs(tcr2, params_vec=params_vec)
+def TCRdist_inner(tcr1, tcr2, submat, tcrdist_cutoff=90, 
+                  ch1=0, ch2=0, output = "edge_list",
+                  only_lower_tri = True,
+                  compare_to_self = False):
     result = mx.sum(submat[tcr1[:, None, :], tcr2[ None,:, :]],axis=2)
-    #zeros = mx.subtract(mx.equal(result, 0), mx.eye(n = result.shape[0], m = result.shape[1])) ## matrix keeping track of off-diagonal zeros
-    #result = mx.add(result, mx.multiply(zeros, -1)) ## set off-diagonal zeros to -1
+    
+    if compare_to_self:
+        if ch1 == ch2:
+            #  if comparing a set of TCRs to itelf, and computing a diagonal block:
+            #  keep track of TCRdist == 0 and set them to -1 (except for the same TCR against itself)
+            mask = (result == 0) & (~np.eye(result.shape[0], dtype=bool))
+            mask = mask*(-1)
+            result = result+mask
+        else:
+            mask = result == 0
+            mask = mask*(-1)
+            result = result+mask
+    ### set values greater than the cutoff to zero
     less_or_equal = mx.less_equal(result, tcrdist_cutoff)
     result = result*less_or_equal
     if mx.__name__ == "cupy":
-      result = mx.asnumpy(result)
+        result = mx.asnumpy(result)
     if output in ["sparse", "both", "edge_list"]:
-        score_dtype = np.int16
+        #score_dtype = np.int16
+        score_dtype = np.int32
         #if tcrdist_cutoff <= 255:
         #    score_dtype = np.uint16
+        ### convert matrix to sparse (gets rid of all zero values)
         result_sparse = scipy.sparse.csr_matrix(result, dtype = score_dtype)
     if output in ["edge_list", "both"]:
+        ### convert matrix to dataframe with indices and TCRdist values
         coo_mat = result_sparse.tocoo()
-        result_list = pd.DataFrame({'edge1_0index': coo_mat.row+ch1, 'edge2_0index': coo_mat.col+ch2, 'TCRdist': coo_mat.data})
-        result_list = result_list[result_list['edge1_0index'] != result_list['edge2_0index']]
-        #result_list.loc[result_list.TCRdist == -1, "TCRdist"] = 0
+        df = pd.DataFrame({'edge1_0index': coo_mat.row+ch1, 'edge2_0index': coo_mat.col+ch2, 'TCRdist': coo_mat.data})
+        if only_lower_tri:
+            df = df[df['edge1_0index'] > df['edge2_0index']]
+        else:
+            df = df[df['edge1_0index'] != df['edge2_0index']]
+        if compare_to_self:
+            ### replace -1's with 0's
+            df['TCRdist'] = df['TCRdist'].replace(-1, 0)
     if output == "both":
-        return(result_sparse, result_list)
+        return(result_sparse, df)
     elif output == "edge_list":
-        return(result_list)
+        return(df)
     elif output == "sparse":
         return(result_sparse)
-
+    
+# def TCRdist_inner2(tcr1, tcr2, submat, tcrdist_cutoff=90, ch1=0, ch2=0, output = "edge_list", only_lower_tri = True):
+#     result = mx.sum(submat[tcr1[:, None, :], tcr2[ None,:, :]],axis=2)
+#     less_or_equal = mx.less_equal(result, tcrdist_cutoff)
+#     result = result*less_or_equal
+#     if mx.__name__ == "cupy":
+#         result = mx.asnumpy(result)
+#     else:
+#         result = np.array(result)
+#     rows, cols = np.indices(result.shape)
+#     df = pd.DataFrame({
+#             'edge1_0index': rows.ravel()+ch1,
+#             'edge2_0index': cols.ravel()+ch2,
+#             'TCRdist': result.ravel()
+#         })
+#     df = df[df < tcrdist_cutoff]
+#     # if mx.__name__ == "cupy" or mx.__name__ == "numpy":
+#     #     df = pd.DataFrame({
+#     #         'edge1_0index': rows.ravel()+ch1,
+#     #         'edge2_0index': cols.ravel()+ch2,
+#     #         'TCRdist': result.ravel()
+#     #     })
+#     # elif mx.__name__ == "mlx":
+#     #     df = pd.DataFrame({
+#     #         'edge1_0index': rows.ravel()+ch1,
+#     #         'edge2_0index': cols.ravel()+ch2,
+#     #         'TCRdist': result.flatten()
+#     #     })
+#     df = df[df['edge1_0index'] < df['edge2_0index']]
+#     return(df)
+    
 # TCRdist batch functions ---------------
 
 ### TCRdist function for GPU with batching for tcr1 and tcr2 lists and sparse output
 
 ### Returns a pandas data frame of all edges with TCRdist less than cutoff (default = 90)
 ### Returns dataframe with 3 columns: 'row' (row_index), 'col' (column index), and 'TCRdist' (TCRdist value)
-def TCRdist_batch(tcr1, tcr2, submat, params_df, tcrdist_cutoff=90, output = "edge_list", chunk_size=1000, print_chunk_size=1000, print_res = True):
+def TCRdist_batch(tcr1, submat, params_df, tcr2=None, tcrdist_cutoff=90, chunk_size=1000, print_chunk_size=1000, print_res = True, only_lower_tri = True):
     #chunk_size = np.int64(chunk_size)
     #print_chunk_size = np.int64(print_chunk_size)
+    compare_to_self = False
     submat = mx.array(submat)
     params_vec = dict(zip(params_df["feature"], params_df["value"]))
-    tcr1 = process_TCRs(tcr1, params_vec=params_vec)
-    tcr2 = process_TCRs(tcr2, params_vec=params_vec)
-    n1 = tcr1.shape[0]
-    n2 = tcr2.shape[0]
+    tcr1_mx = process_TCRs(tcr1, params_vec=params_vec)
+    tcr1 = tcr1.copy()
+    tcr1['tcr_index'] = range(len(tcr1))
+    if tcr2 is None:
+        compare_to_self = True
+        tcr2_mx = tcr1_mx
+    else:
+        tcr2 = tcr2.copy()
+        tcr2_mx = process_TCRs(tcr2, params_vec=params_vec)
+        tcr2['tcr_index'] = range(len(tcr2))
+    n1 = tcr1_mx.shape[0]
+    n2 = tcr2_mx.shape[0]
     num_chunks1 = np.int64(np.ceil(n1//chunk_size))
     num_chunks2 = np.int64(np.ceil(n2//chunk_size))
     if print_res:
@@ -180,20 +278,37 @@ def TCRdist_batch(tcr1, tcr2, submat, params_df, tcrdist_cutoff=90, output = "ed
                 print('Processing chunk (rows)', ch)
         chunk_end = min(ch + chunk_size, n1)
         row_range1 = slice(ch, chunk_end)
-        tcr1_tmp = tcr1[row_range1,:]
+        tcr1_tmp = tcr1_mx[row_range1,:]
         for ch2 in range(0, n2, chunk_size):
+            if compare_to_self and ch < ch2 and only_lower_tri:
+                continue
             chunk_end2 = min(ch2 + chunk_size, n2)
             row_range2 = slice(ch2, chunk_end2)
-            tcr2_tmp = tcr2[row_range2,:]
-            edges_tmp = TCRdist_simple(tcr1=tcr1_tmp, tcr2=tcr2_tmp, submat=submat, tcrdist_cutoff=tcrdist_cutoff,
-                                       ch1=ch, ch2=ch2, output="edge_list")
+            tcr2_tmp = tcr2_mx[row_range2,:]
+            edges_tmp = TCRdist_inner(tcr1=tcr1_tmp, tcr2=tcr2_tmp, submat=submat,
+                                       tcrdist_cutoff=tcrdist_cutoff,
+                                       ch1=ch, ch2=ch2, output="edge_list", only_lower_tri = only_lower_tri,
+                                       compare_to_self = compare_to_self)
             res_list.append(edges_tmp)
     res = pd.concat(res_list)
+    res.reset_index(inplace=True)
+    res = res.drop('index', axis=1)
     end_time = time.time()
     if print_res:
         res
         print(f"Time taken: {end_time - start_time:.6f} seconds")
-    return(res)
+    if compare_to_self:
+        res_dict = {
+            'TCRdist_df': res,
+            'tcr1': tcr1
+        }
+    else:
+        res_dict = {
+            'TCRdist_df': res,
+            'tcr1': tcr1,
+            'tcr2': tcr2
+        }
+    return(res_dict)
 
 ## Original function from Misha (slightly modified)
 
