@@ -169,11 +169,10 @@ def TCRdist_inner(tcr1, tcr2, submat, tcrdist_cutoff=90,
                   only_lower_tri = True,
                   compare_to_self = False):
     result = mx.sum(submat[tcr1[:, None, :], tcr2[ None,:, :]],axis=2)
-    
+    #  if comparing a set of TCRs to itelf:
+    #  keep track of TCRdist == 0 and set them to -1 (except for the same TCR against itself)
     if compare_to_self:
         if ch1 == ch2:
-            #  if comparing a set of TCRs to itelf, and computing a diagonal block:
-            #  keep track of TCRdist == 0 and set them to -1 (except for the same TCR against itself)
             mask = (result == 0) & (~np.eye(result.shape[0], dtype=bool))
             mask = mask*(-1)
             result = result+mask
@@ -181,6 +180,12 @@ def TCRdist_inner(tcr1, tcr2, submat, tcrdist_cutoff=90,
             mask = result == 0
             mask = mask*(-1)
             result = result+mask
+    # if comparing two different sets of TCRs:
+    #  keep track of TCRdist == 0 and set them to -1
+    else:
+        mask = result == 0
+        mask = mask*(-1)
+        result = result+mask
     ### set values greater than the cutoff to zero
     less_or_equal = mx.less_equal(result, tcrdist_cutoff)
     result = result*less_or_equal
@@ -197,13 +202,13 @@ def TCRdist_inner(tcr1, tcr2, submat, tcrdist_cutoff=90,
         ### convert matrix to dataframe with indices and TCRdist values
         coo_mat = result_sparse.tocoo()
         df = pd.DataFrame({'edge1_0index': coo_mat.row+ch1, 'edge2_0index': coo_mat.col+ch2, 'TCRdist': coo_mat.data})
-        if only_lower_tri:
-            df = df[df['edge1_0index'] > df['edge2_0index']]
-        else:
-            df = df[df['edge1_0index'] != df['edge2_0index']]
         if compare_to_self:
-            ### replace -1's with 0's
-            df['TCRdist'] = df['TCRdist'].replace(-1, 0)
+            if only_lower_tri:
+                df = df[df['edge1_0index'] > df['edge2_0index']]
+            else:
+                df = df[df['edge1_0index'] != df['edge2_0index']]
+        ### replace -1's with 0's
+        df['TCRdist'] = df['TCRdist'].replace(-1, 0)
     if output == "both":
         return(result_sparse, df)
     elif output == "edge_list":
