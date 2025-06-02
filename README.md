@@ -1,4 +1,4 @@
-# TCRdist GPU implementation with batching
+# A Fast GPU-compatible Implementation of TCRdist
 
 ## Overview
 
@@ -10,9 +10,11 @@ In order to **facilitate analysis of large TCR datasets**, the function **calcul
 
 The **[TIRTLtools R package](https://github.com/NicholasClark/TIRTLtools)**, a package written to provide analysis and visualization functions for paired-chain [TIRTL-seq](https://github.com/pogorely/TIRTL) data, contains an **R wrapper function** `TCRdist()` that calls `TCRdist_batch()` through the `reticulate` package.
 
-## Links
+## Links and References
 
 For details on TCRdist, see [Dash et al., Nature 2017](https://doi.org/10.1038/nature22383)
 
 For details on the TIRTLseq TCR pairing pipeline, see the [TIRTLseq preprint (Pogorelyy and Kirk et al.)](https://www.biorxiv.org/content/10.1101/2024.09.16.613345v2) and our [github repository](https://github.com/pogorely/TIRTL).
 
+<br>
+Written by Mikhail Pogorelyy and Nicholas Clark, [Thomas Lab, St. Jude Children's Research Hospital](https://www.stjude.org/research/labs/thomas-lab.html)
